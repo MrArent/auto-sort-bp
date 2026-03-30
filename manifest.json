@@ -1,0 +1,39 @@
+{
+    "format_version": 2,
+    "_comment": "Changed server-ui from 2.1.0-beta to 2.0.0 for Realms compatibility",
+    "_comment2": "Changed server from 2.6.0-beta to 2.6.0 for Realms compatibility",
+    "_comment3": "Removed unused script_eval",
+    "header": {
+        "name": "AUTO SORT BP [DEV]",
+        "description": "Auto Sort items from one chest into another!",
+        "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "version": [1, 0, 2],
+        "min_engine_version": [1, 21, 110]
+    },
+    "modules": [
+        {
+            "description": "data",
+            "type": "data",
+            "uuid": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+            "version": [1, 0, 0]
+        },
+        {
+            "description": "scripts",
+            "type": "script",
+            "language": "javascript",
+            "uuid": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "version": [1, 0, 0],
+            "entry": "scripts/main.js"
+        }
+    ],
+    "dependencies": [
+        {
+            "module_name": "@minecraft/server",
+            "version": "2.6.0"
+        },
+        {
+            "module_name": "@minecraft/server-ui",
+            "version": "2.0.0"
+        }
+    ]
+}
