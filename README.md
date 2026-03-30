@@ -63,7 +63,6 @@ Tag output chests with **item frames** to target specific item types, or leave t
 1. Download the `.mcpack` file from [Releases](../../releases)
 2. Double-click the file — Minecraft will import it automatically
 3. Apply the pack to your world under **Behavior Packs** in world settings
-4. Enable **Beta APIs** under **Experiments** in world settings
 
 ---
 
