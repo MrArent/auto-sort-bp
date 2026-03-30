@@ -5,7 +5,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.0.2] - 2026-03-30
+## [1.1.0] - 2026-03-30
 
 ### Added
 - **Live preview toggle** per chest — particles continuously outline the scan radius until toggled off, replacing the one-shot timed preview. Accessible from both the sneak+right-click form and the Manage All Chests form. State is saved per chest and persists across world reloads.
