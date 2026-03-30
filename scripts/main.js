@@ -116,9 +116,60 @@ world.afterEvents.worldLoad.subscribe(() => {
     // The original code called loadAll() (JSON.parse of the entire chest registry) once for
     // the outer for-of, then called it AGAIN inside the loop for every chest that had a networkId.
     // With N networked chests that was N+1 full deserializations per sort tick.
-    // Now the single parsed array is reused in the .filter() call below.
+    // Now the single parsed array is reused for network grouping below.
 
     const allChests = loadAll();
+
+    // CHANGED: Build networkGroups Map once before the outer loop — O(N) total.
+    // Old: const networkChests = allChests.filter(c => c.networkId === inputChest.networkId)
+    // That filter ran inside the loop, so each of the N networked chests scanned all N chests
+    // to find its group members — O(N) per chest = O(N²) total.
+    // The Map is built in one O(N) pass; each lookup inside the loop is O(1).
+
+    /** @type {Map<string, import("./persistence.js").InputChest[]>} */
+    const networkGroups = new Map();
+
+    for (const chest of allChests) {
+      if (!chest.networkId) continue;
+      if (!networkGroups.has(chest.networkId)) networkGroups.set(chest.networkId, []);
+      networkGroups.get(chest.networkId).push(chest);
+    }
+
+    // CHANGED: Build routingCache Map once per unique networkId — O(unique_networks × M × R³) block reads.
+    // Old: routingMap was rebuilt inside the loop for every input chest. For a network of M chests,
+    // findOutputChests was called M times per chest = M² calls total, each scanning up to R³ blocks.
+    // All M chests in the same network produce an identical routingMap (same networkId → same output pool),
+    // so the M²−M redundant builds were pure waste.
+    // Now each unique networkId's routingMap is built exactly once and reused via O(1) cache lookup.
+
+    /** @type {Map<string, Map<string, import("@minecraft/server").Container>>} */
+    const routingCache = new Map();
+
+    for (const [networkId, members] of networkGroups) {
+      /** @type {Map<string, import("@minecraft/server").Container>} */
+      const routingMap = new Map();
+
+      for (const netChest of members) {
+        const netDim = world.getDimension(netChest.dimension);
+
+        for (const { loc, acceptedItem } of findOutputChests(netChest, netDim)) {
+          const container = getContainer(loc, netDim);
+          if (!container) continue;
+
+          if (acceptedItem) {
+            if (!routingMap.has(acceptedItem)) routingMap.set(acceptedItem, container);
+          } else {
+            for (let i = 0; i < container.size; i++) {
+              const item = container.getItem(i);
+              if (item && !routingMap.has(item.typeId)) routingMap.set(item.typeId, container);
+            }
+          }
+        }
+      }
+
+      routingCache.set(networkId, routingMap);
+    }
+
     for (const inputChest of allChests) {
       if (!inputChest.enabled) continue;
       try {
@@ -126,33 +177,57 @@ world.afterEvents.worldLoad.subscribe(() => {
         const inputContainer = getContainer(inputChest, dim);
         if (!inputContainer) continue;
 
-        // routingMap: itemTypeId → target Container
-        /** @type {Map<string, import("@minecraft/server").Container>} */
-        const routingMap = new Map();
+        // CHANGED: routingMap is now retrieved from routingCache for networked chests (O(1)),
+        // or built inline for standalone chests (no networkId). The old networkChests array and
+        // inner for-of loop have been replaced by the pre-built cache above.
+        //
+        // Old:
+        //   const routingMap = new Map();
+        //   const networkChests = inputChest.networkId
+        //     ? allChests.filter(c => c.networkId === inputChest.networkId)
+        //     : [inputChest];
+        //   for (const netChest of networkChests) {
+        //     const netDim = world.getDimension(netChest.dimension);
+        //     for (const { loc, acceptedItem } of findOutputChests(netChest, netDim)) {
+        //       const container = getContainer(loc, netDim);
+        //       if (!container) continue;
+        //       if (acceptedItem) {
+        //         if (!routingMap.has(acceptedItem)) routingMap.set(acceptedItem, container);
+        //       } else {
+        //         for (let i = 0; i < container.size; i++) {
+        //           const item = container.getItem(i);
+        //           if (item && !routingMap.has(item.typeId)) routingMap.set(item.typeId, container);
+        //         }
+        //       }
+        //     }
+        //   }
 
-        // Use the whole network if a networkId is set, otherwise just this chest.
-        // CHANGED: was loadAll().filter(...) — now reuses the already-parsed allChests array.
-        // Old: const networkChests = inputChest.networkId
-        //        ? loadAll().filter(c => c.networkId === inputChest.networkId)
-        //        : [inputChest];
+        let routingMap;
 
-        const networkChests = inputChest.networkId
-          ? allChests.filter(c => c.networkId === inputChest.networkId)
-          : [inputChest];
+        if (inputChest.networkId) {
 
-        for (const netChest of networkChests) {
-          const netDim = world.getDimension(netChest.dimension);
-          for (const { loc, acceptedItem } of findOutputChests(netChest, netDim)) {
+          // Networked chest: reuse the pre-built map for this networkId — O(1) lookup.
+
+          routingMap = routingCache.get(inputChest.networkId);
+        } else {
+
+          // Standalone chest: build its routingMap inline (no sharing, no cache needed).
+
+          routingMap = new Map();
+          const netDim = world.getDimension(inputChest.dimension);
+
+          for (const { loc, acceptedItem } of findOutputChests(inputChest, netDim)) {
             const container = getContainer(loc, netDim);
             if (!container) continue;
+
             if (acceptedItem) {
 
-              // Tagged chest: first tag for a given item type wins
+              // Tagged chest: first tag for a given item type wins.
 
               if (!routingMap.has(acceptedItem)) routingMap.set(acceptedItem, container);
             } else {
 
-              // Untagged chest: infer accepted types from current contents
+              // Untagged chest: infer accepted types from current contents.
 
               for (let i = 0; i < container.size; i++) {
                 const item = container.getItem(i);

@@ -41,7 +41,7 @@ export const showManageForm = (player, clickedLoc) => {
   // preview-related actions together. Label reflects current state (green ON / gray OFF).
   // Old: there was no livePreview button here; "Preview Radius" was immediately followed by "Edit".
 
-  if (clickedLoc && isRegistered)  { form.button(clicked.livePreview ? "§aLive Preview: ON§r" : "§7Live Preview: OFF§r", "textures/blocks/chest_front"); actions.push("livePreview"); }
+  if (clickedLoc && isRegistered)  { form.button(clicked.livePreview ? "§aLive Preview: ON§r" : "Live Preview: OFF", "textures/blocks/chest_front"); actions.push("livePreview"); }
   if (clickedLoc && isRegistered)  { form.button("Edit Label / Radius / Mode", "textures/blocks/chest_front"); actions.push("edit"); }
   if (clickedLoc && isRegistered)  { form.button(clicked.enabled ? "§cPause Sorting§r" : "§aResume Sorting§r", "textures/blocks/chest_front"); actions.push("toggle"); }
   if (clickedLoc && isRegistered)  { form.button("View Stats",                 "textures/blocks/chest_front"); actions.push("stats"); }
@@ -187,7 +187,7 @@ export const showChestActionsForm = (player, chest, returnLoc) => {
     //   6: "Back"
 
     .button("Preview Radius")
-    .button(chest.livePreview ? "§aLive Preview: ON§r" : "§7Live Preview: OFF§r")
+    .button(chest.livePreview ? "§aLive Preview: ON§r" : "Live Preview: OFF")
     .button("Edit Label / Radius / Mode")
     .button("View Stats")
     .button(chest.enabled ? "§cPause Sorting§r" : "§aResume Sorting§r")
