@@ -29,6 +29,7 @@ Tag output chests with **item frames** to target specific item types, or leave t
 - **Configurable scan radius** — up to 20 blocks
 - **Max fill cap** — prevent output chests from being filled past a set percentage
 - **Network IDs** — link multiple input chests to share the same output pool
+- **Overflow chests** — assign a fallback chest per network for items that can't be routed
 - **Live preview** — persistent particle border showing a chest's scan radius
 - **Sort statistics** — track total items sorted per chest with per-type breakdowns
 - **In-game UI** — all configuration done via sneak + right-click forms, no commands needed
@@ -55,6 +56,23 @@ Tag output chests with **item frames** to target specific item types, or leave t
 
 - Output chests with no item frame act as **catch-alls**
 - They accept any item that already exists inside them
+
+### Setting Up an Overflow Chest
+
+An overflow chest catches items that couldn't be routed to any output chest, preventing them from piling up in the input chest.
+
+1. **Sneak + right-click** any unregistered chest
+2. Select **"Set as Overflow Chest"** (only appears when a network exists without one)
+3. Pick the network to assign it to from the dropdown
+
+> Only one overflow chest can be assigned per network.
+
+### Live Preview
+
+Live Preview keeps the radius particle border running continuously around an input chest, updating every sort pass.
+
+- Toggle it from the manage form: **Live Preview: ON / OFF**
+- The one-shot **Preview Radius** button still works independently
 
 ---
 
