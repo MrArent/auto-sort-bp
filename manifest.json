@@ -4,7 +4,7 @@
     "_comment2": "Changed server from 2.6.0-beta to 2.6.0 for Realms compatibility",
     "_comment3": "Removed unused script_eval",
     "header": {
-        "name": "AUTO SORT BP [DEV]",
+        "name": "AUTO SORT BP By GodsApostles",
         "description": "Auto Sort items from one chest into another!",
         "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "version": [1, 1, 0],
