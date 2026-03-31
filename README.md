@@ -67,12 +67,12 @@ An overflow chest catches items that couldn't be routed to any output chest, pre
 
 > Only one overflow chest can be assigned per network.
 
-### Live Preview
+### Radius Preview
 
-Live Preview keeps the radius particle border running continuously around an input chest, updating every sort pass.
+Live Preview keeps the radius particle border running continuously around an input chest
 
 - Toggle it from the manage form: **Live Preview: ON / OFF**
-- The one-shot **Preview Radius** button still works independently
+- The one-shot **Preview Radius** button will bring it up temporarily
 
 ---
 
