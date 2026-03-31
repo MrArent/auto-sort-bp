@@ -5,22 +5,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
-
-### Added
-- **Overflow chest** — designate a fallback output chest per network ID. Items with no matching route are sent there instead of staying in the input chest. Registered via "Set as Overflow Chest" in the sneak+right-click form, which appears only for unregistered chests when at least one network has no overflow assigned. A dropdown selects the target network. Breaking an overflow chest automatically unregisters it.
-- **Output chest cache** — `findOutputChests` results are now cached across sort ticks and only rebuilt on a cache miss. Misses are triggered by: chest placed/broken within radius, item frame placed/broken within radius, frame contents changed, or chest config edited. On stable worlds with no block changes, the per-tick block scan cost drops to zero.
-
-### Fixed
-- **New networked chest missing its output pool on first sort** — registering a new input chest into an existing network did not invalidate the network's output cache, so the new chest sorted using the stale cache built without it. Its outputs were only discovered after a frame interaction happened to trigger a cache invalidation. Cache is now always invalidated on registration.
-
----
-
 ## [1.1.0] - 2026-03-30
 
 ### Added
 - **Live preview toggle** per chest — particles continuously outline the scan radius until toggled off, replacing the one-shot timed preview. Accessible from both the sneak+right-click form and the Manage All Chests form. State is saved per chest and persists across world reloads.
-
+- **Overflow chest** — designate a fallback output chest per network ID. Items with no matching route are sent there instead of staying in the input chest. Registered via "Set as Overflow Chest" in the sneak+right-click form, which appears only for unregistered chests when at least one network has no overflow assigned. A dropdown selects the target network. Breaking an overflow chest automatically unregisters it.
+- **Output chest cache** — `findOutputChests` results are now cached across sort ticks and only rebuilt on a cache miss. Misses are triggered by: chest placed/broken within radius, item frame placed/broken within radius, frame contents changed, or chest config edited. On stable worlds with no block changes, the per-tick block scan cost drops to zero.
+  
 ### Fixed
 - **Multiple item frames on one output chest** — only the first frame was ever read due to a `break` in the face scan loop. All frames on a chest are now collected and each registers its item type in the routing map independently.
 
