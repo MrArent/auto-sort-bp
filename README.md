@@ -1,6 +1,7 @@
 <div align="center">
 
 # Auto Sort BP
+# By GodsApostles
 
 **A Minecraft Bedrock behavior pack that automatically sorts items from input chests into organized output chests**
 
