@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [1.1.0] - 2026-03-30
 
 ### Added
-- **Live preview toggle** per chest — particles continuously outline the scan radius until toggled off, replacing the one-shot timed preview. Accessible from both the sneak+right-click form and the Manage All Chests form. State is saved per chest and persists across world reloads.
+- **Live preview toggle** per chest — particles continuously outline the scan radius until toggled off, one-shot timed preview is still available and independent. Accessible from both the sneak+right-click form and the Manage All Chests form. State is saved per chest and persists across world reloads.
 - **Overflow chest** — designate a fallback output chest per network ID. Items with no matching route are sent there instead of staying in the input chest. Registered via "Set as Overflow Chest" in the sneak+right-click form, which appears only for unregistered chests when at least one network has no overflow assigned. A dropdown selects the target network. Breaking an overflow chest automatically unregisters it.
 - **Output chest cache** — `findOutputChests` results are now cached across sort ticks and only rebuilt on a cache miss. Misses are triggered by: chest placed/broken within radius, item frame placed/broken within radius, frame contents changed, or chest config edited. On stable worlds with no block changes, the per-tick block scan cost drops to zero.
   
