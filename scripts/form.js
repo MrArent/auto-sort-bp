@@ -1,9 +1,15 @@
 import { world, system } from "@minecraft/server";
 import { ActionFormData, MessageFormData, ModalFormData } from "@minecraft/server-ui";
 import { PARTICLE_OPTIONS, SCAN_MODES } from "./config.js";
-import { loadAll, loadSettings, saveSettings, registerChest, unregisterChest, findRegistered, notify, getStats } from "./persistence.js";
+import { loadAll, loadSettings, saveSettings, registerChest, unregisterChest, findRegistered, notify, getStats, loadOverflowChests, registerOverflowChest, unregisterOverflowChest, findOverflowChest } from "./persistence.js";
 import { getContainer, findOutputChests } from "./blocks.js";
 import { showRadiusPreview } from "./preview.js";
+
+// ADDED: invalidateChest imported so form actions that change a chest's config or remove it
+// immediately drop its outputCache entry. Without this the cache would serve stale routing
+// data until the next block-event-driven invalidation (which may never come for config changes).
+
+import { invalidateChest } from "./cache.js";
 
 /**
  * @typedef {import("./persistence.js").InputChest} InputChest
@@ -32,9 +38,27 @@ export const showManageForm = (player, clickedLoc) => {
         : `${all.length} chest(s) registered.\nTotal sorted: §e${totalSorted}\nNotifications: ${settings.notifications ? "§aOn§r" : "§cOff§r"}`
     );
 
+  // ADDED: compute which networkIds exist but have no overflow chest registered.
+  // Used to conditionally show the "Set as Overflow Chest" button and populate its dropdown.
+  // Only shown when the clicked chest is unregistered (a registered input chest cannot also
+  // be an overflow chest).
+
+  const existingOverflows = loadOverflowChests();
+  const networkedIds = [...new Set(all.map(c => c.networkId).filter(Boolean))];
+  const networksWithoutOverflow = networkedIds.filter(
+    id => !existingOverflows.some(o => o.networkId === id)
+  );
+  const canSetOverflow = clickedLoc && !isRegistered && networksWithoutOverflow.length > 0;
+
   /** @type {string[]} */
   const actions = [];
   if (clickedLoc && !isRegistered) { form.button("Set as Input Chest",        "textures/blocks/chest_front"); actions.push("set"); }
+
+  // ADDED: "Set as Overflow Chest" button — only shown for unregistered chests when at least
+  // one networkId exists without an overflow. Grouped with "Set as Input Chest" since both are
+  // registration actions for an unregistered chest.
+
+  if (canSetOverflow)              { form.button("Set as Overflow Chest",      "textures/blocks/chest_front"); actions.push("overflow"); }
   if (clickedLoc && isRegistered)  { form.button("Preview Radius",             "textures/blocks/chest_front"); actions.push("preview"); }
 
   // ADDED: Live Preview toggle button, placed directly below "Preview Radius" to group the two
@@ -53,6 +77,11 @@ export const showManageForm = (player, clickedLoc) => {
     if (res.canceled) return;
     const action = actions[/** @type {number} */ (res.selection)];
     if (action === "set")      system.run(() => showRegisterForm(player, /** @type {any} */ (clickedLoc)));
+
+    // ADDED: overflow handler — opens showSetOverflowForm so the player picks a networkId
+    // from a dropdown. Only reachable when canSetOverflow is true.
+
+    if (action === "overflow") system.run(() => showSetOverflowForm(player, /** @type {any} */ (clickedLoc), networksWithoutOverflow, clickedLoc));
     if (action === "preview")  system.run(() => showRadiusPreview(/** @type {any} */ (clicked)));
 
     // ADDED: livePreview handler — flips chest.livePreview, saves, reopens this form so the
@@ -76,6 +105,29 @@ export const showManageForm = (player, clickedLoc) => {
     if (action === "manage")   system.run(() => showAllChestsForm(player, clickedLoc));
     if (action === "settings") system.run(() => showSettingsForm(player, clickedLoc));
   }).catch(() => {});
+};
+
+/**
+ * Form for assigning the clicked chest as the overflow chest for a networkId.
+ * Shows a dropdown of networkIds that have no overflow chest yet.
+ * If only one eligible networkId exists the dropdown still shows for clarity.
+ * @param {import("@minecraft/server").Player} player
+ * @param {{ x: number, y: number, z: number, dimension: string }} loc
+ * @param {string[]} eligibleNetworkIds  networkIds with no overflow chest registered
+ * @param {import("./persistence.js").Loc | null} returnLoc
+ */
+const showSetOverflowForm = (player, loc, eligibleNetworkIds, returnLoc) => {
+  new ModalFormData()
+    .title("Set Overflow Chest")
+    .dropdown("Assign to Network", eligibleNetworkIds)
+    .show(player)
+    .then((res) => {
+      if (res.canceled || !res.formValues) { system.run(() => showManageForm(player, returnLoc)); return; }
+      const networkId = eligibleNetworkIds[/** @type {number} */ (res.formValues[0])];
+      registerOverflowChest({ networkId, ...loc });
+      notify(player, `[AutoSorter] Overflow chest set for network §b${networkId}§r at §b${loc.x}, ${loc.y}, ${loc.z}§r.`);
+      system.run(() => showManageForm(player, returnLoc));
+    }).catch(() => {});
 };
 
 /**
@@ -107,6 +159,19 @@ export const showRegisterForm = (player, loc, existing = null, onBack = null) =>
       // existing?.livePreview preserves the flag when editing; ?? false defaults new chests to off.
 
       const chest     = { ...loc, label, networkId, radius, scanMode, maxFill, enabled: existing?.enabled ?? true, livePreview: existing?.livePreview ?? false };
+
+      // ADDED: invalidate cache before saving.
+      // Edit: drops the old entry so stale radius/scanMode/networkId data isn't reused.
+      // New networked registration: drops the existing network cache entry so the next sort
+      // tick rebuilds it with this chest included as a member. No-op for standalone new chests
+      // (key doesn't exist yet), so safe to call unconditionally in both cases.
+      //
+      // Old: if (existing) invalidateChest(existing);
+      // Bug: skipping invalidation for new networked chests meant the stale network cache
+      // (built without this chest) was reused, so outputs only in this chest's radius were
+      // never found until a frame interaction happened to trigger invalidateFor().
+
+      invalidateChest(chest);
       registerChest(chest);
       notify(player, `[AutoSorter] "${label}" ${existing ? "updated" : "§aregistered§r"} (r:§b${radius}§r, ${scanMode}, fill:§b${maxFill}%§r${networkId ? `, net:§b${networkId}§r` : ""})`);
       system.run(() => { showRadiusPreview(chest); onBack ? onBack() : showManageForm(player, loc); });
@@ -170,21 +235,6 @@ export const showChestActionsForm = (player, chest, returnLoc) => {
 
     // CHANGED: "Live Preview: ON/OFF" button inserted at index 1 (after "Preview Radius").
     // All buttons that followed shifted down by one, so their res.selection values increased by 1.
-    // Old button order and selection indices:
-    //   0: "Preview Radius"
-    //   1: "Edit Label / Radius / Mode"
-    //   2: "View Stats"
-    //   3: Pause / Resume
-    //   4: "§cDelete§r"
-    //   5: "Back"
-    // New button order:
-    //   0: "Preview Radius"          (unchanged)
-    //   1: "Live Preview: ON/OFF"    (ADDED)
-    //   2: "Edit Label / Radius / Mode"
-    //   3: "View Stats"
-    //   4: Pause / Resume
-    //   5: "§cDelete§r"
-    //   6: "Back"
 
     .button("Preview Radius")
     .button(chest.livePreview ? "§aLive Preview: ON§r" : "Live Preview: OFF")
@@ -207,30 +257,15 @@ export const showChestActionsForm = (player, chest, returnLoc) => {
         notify(player, `[AutoSorter] Live preview ${updated.livePreview ? "§aenabled§r" : "§cdisabled§r"} for "${updated.label}".`);
         system.run(() => showChestActionsForm(player, updated, returnLoc));
       }
-
-      // CHANGED: was selection 1, now selection 2.
-
       if (res.selection === 2) system.run(() => showRegisterForm(player, chest, chest, () => showChestActionsForm(player, chest, returnLoc)));
-
-      // CHANGED: was selection 2, now selection 3.
-
       if (res.selection === 3) system.run(() => showStatsForm(player, chest, returnLoc, () => showChestActionsForm(player, chest, returnLoc)));
-
-      // CHANGED: was selection 3, now selection 4.
-
       if (res.selection === 4) {
         const updated = { ...chest, enabled: !chest.enabled };
         registerChest(updated);
         notify(player, `[AutoSorter] "${chest.label}" ${updated.enabled ? "§aResumed§r" : "§cPaused§r"}.`);
         system.run(() => showChestActionsForm(player, updated, returnLoc));
       }
-
-      // CHANGED: was selection 4, now selection 5.
-
       if (res.selection === 5) system.run(() => showDeleteConfirm(player, chest, returnLoc));
-
-      // CHANGED: was selection 5, now selection 6.
-
       if (res.selection === 6) system.run(() => showAllChestsForm(player, returnLoc));
     }).catch(() => {});
 };
@@ -287,6 +322,11 @@ export const showDeleteConfirm = (player, chest, returnLoc) => {
     .show(player)
     .then((res) => {
       if (res.canceled || res.selection === 0) { system.run(() => showChestActionsForm(player, chest, returnLoc)); return; }
+
+      // ADDED: invalidate cache before unregistering so runSort() doesn't serve stale routing
+      // data on the tick between unregister and the next natural cache miss.
+
+      invalidateChest(chest);
       unregisterChest(chest);
       player.sendMessage(`§c[AutoSorter]§r "${chest.label}" removed.`);
       system.run(() => {
@@ -342,6 +382,11 @@ export const showBreakConfirmForm = (player, loc, permutation) => {
       if (res.canceled || res.selection === 0) {
         system.run(() => { try { world.getDimension(loc.dimension).getBlock(loc)?.setPermutation(permutation); } catch {} });
       } else {
+
+        // ADDED: invalidate cache using the full chest object (has networkId) rather than loc
+        // (which only has coordinates). cacheKey() needs networkId to build the correct key.
+
+        invalidateChest(chest);
         unregisterChest(loc);
         player.sendMessage(`§c[AutoSorter]§r "${chest.label}" deleted.`);
         system.run(() => {

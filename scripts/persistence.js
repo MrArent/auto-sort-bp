@@ -1,16 +1,10 @@
 import { world } from "@minecraft/server";
 import { CONFIG, DEFAULT_SETTINGS } from "./config.js";
 
-// CHANGED: InputChest typedef gains the livePreview field.
-// Old: @typedef {{ ... maxFill: number }} InputChest
-// New: @typedef {{ ... maxFill: number, livePreview: boolean }} InputChest
-// livePreview defaults to false for new chests (set in showRegisterForm).
-// Existing saved chests without this field will read it as undefined, which is falsy,
-// so they behave as if livePreview is off — no migration needed.
-
 /**
  * @typedef {{ x: number, y: number, z: number, dimension: string, label: string, radius: number, scanMode: string, enabled: boolean, networkId: string | null, maxFill: number, livePreview: boolean }} InputChest
  * @typedef {{ particle: string, previewTicks: number, notifications: boolean, sortInterval: number }} Settings
+ * @typedef {{ networkId: string, x: number, y: number, z: number, dimension: string }} OverflowChest
  */
 
 // Per-chest dynamic property key for sort statistics.
@@ -92,42 +86,67 @@ export const getStats = (chest) => {
   } catch { return { totalSorted: 0, sortRuns: 0, itemCounts: {} }; }
 };
 
-// CHANGED: recordSort and incrementSortRun replaced by recordSortBatch.
-//
-// Old recordSort — called once per item moved; each call did a full read-modify-write cycle:
-//   export const recordSort = (chest, itemType, amount) => {
-//     const stats = getStats(chest);                            // JSON.parse
-//     stats.totalSorted += amount;
-//     stats.itemCounts[itemType] = (stats.itemCounts[itemType] ?? 0) + amount;
-//     world.setDynamicProperty(statsKey(chest), JSON.stringify(stats)); // JSON.stringify + write
-//   };
-//
-// Old incrementSortRun — called once per sort pass; another full read-modify-write cycle:
-//   export const incrementSortRun = (chest) => {
-//     const stats = getStats(chest);                            // JSON.parse again
-//     stats.sortRuns = (stats.sortRuns ?? 0) + 1;
-//     world.setDynamicProperty(statsKey(chest), JSON.stringify(stats)); // JSON.stringify + write again
-//   };
-//
-// Together they caused up to (itemsInChest + 1) separate parse/stringify pairs per chest
-// per sort tick — 28 for a full 27-slot chest. recordSortBatch collapses all of that
-// into a single getStats call and a single setDynamicProperty call per sort pass.
-
 /**
  * Records all items moved in one sort pass and increments the run counter.
- * Replaces the old per-item recordSort + per-pass incrementSortRun with a
- * single dynamic-property read and write for the entire pass.
+ * Replaces the old per-item recordSort + per-pass incrementSortRun — one read and one write
+ * per pass regardless of item count (was up to 28 read/write pairs for a full chest).
  * @param {InputChest} chest
  * @param {Record<string, number>} itemAmounts  map of itemTypeId → total amount moved this pass
  */
 export const recordSortBatch = (chest, itemAmounts) => {
   try {
-    const stats = getStats(chest);                       // one read
+    const stats = getStats(chest);
     stats.sortRuns = (stats.sortRuns ?? 0) + 1;
     for (const [itemType, amount] of Object.entries(itemAmounts)) {
       stats.totalSorted += amount;
       stats.itemCounts[itemType] = (stats.itemCounts[itemType] ?? 0) + amount;
     }
-    world.setDynamicProperty(statsKey(chest), JSON.stringify(stats)); // one write
+    world.setDynamicProperty(statsKey(chest), JSON.stringify(stats));
   } catch (e) { console.warn("[AutoSorter] recordSortBatch error: " + e); }
+};
+
+// ── Overflow chest storage ────────────────────────────────────────────────────
+// One overflow chest per networkId. Items with no matching route are sent here
+// instead of staying in the input chest. Only networked chests support overflow.
+
+/**
+ * Loads all registered overflow chests from world dynamic properties.
+ * @returns {OverflowChest[]}
+ */
+export const loadOverflowChests = () => {
+  try {
+    const r = world.getDynamicProperty(CONFIG.PROP_OVERFLOW);
+    return r ? JSON.parse(/** @type {string} */ (r)) : [];
+  } catch { return []; }
+};
+
+/** @param {OverflowChest[]} overflows */
+const saveOverflowChests = (overflows) =>
+  world.setDynamicProperty(CONFIG.PROP_OVERFLOW, JSON.stringify(overflows));
+
+/**
+ * Registers an overflow chest for a networkId, replacing any existing one for that network.
+ * @param {OverflowChest} overflow
+ */
+export const registerOverflowChest = (overflow) =>
+  saveOverflowChests([
+    ...loadOverflowChests().filter(o => o.networkId !== overflow.networkId),
+    overflow,
+  ]);
+
+/**
+ * Removes the overflow chest registered for a given networkId.
+ * @param {string} networkId
+ */
+export const unregisterOverflowChest = (networkId) =>
+  saveOverflowChests(loadOverflowChests().filter(o => o.networkId !== networkId));
+
+/**
+ * Returns the overflow chest for a given networkId, or null if none registered.
+ * @param {string | null} networkId
+ * @returns {OverflowChest | null}
+ */
+export const findOverflowChest = (networkId) => {
+  if (!networkId) return null;
+  return loadOverflowChests().find(o => o.networkId === networkId) ?? null;
 };

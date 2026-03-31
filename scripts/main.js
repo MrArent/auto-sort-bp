@@ -1,19 +1,9 @@
 import { world, system } from "@minecraft/server";
 import { CONFIG } from "./config.js";
-
-// CHANGED: replaced { recordSort, incrementSortRun } with { recordSortBatch }.
-// Old: import { loadAll, loadSettings, findRegistered, recordSort, incrementSortRun } from "./persistence.js";
-// recordSort wrote stats once per item moved; incrementSortRun wrote again at the end of each pass.
-// That was up to (slots + 1) separate dynamic-property read/write pairs per chest per tick.
-// recordSortBatch does one read and one write for the whole pass regardless of how many items moved.
-
-import { loadAll, loadSettings, findRegistered, recordSortBatch } from "./persistence.js";
+import { loadAll, loadSettings, findRegistered, recordSortBatch, findOverflowChest, loadOverflowChests, unregisterOverflowChest } from "./persistence.js";
 import { getContainer, findOutputChests, addToContainer } from "./blocks.js";
 import { showManageForm, showBreakConfirmForm } from "./form.js";
-
-// ADDED: showRadiusPreview imported here so the live preview loop in worldLoad can call it.
-// Old: preview.js was only imported inside form.js; main.js had no direct dependency on it.
-
+import { outputCache, cacheKey, invalidateFor } from "./cache.js";
 import { showRadiusPreview } from "./preview.js";
 
 // Per-player cooldown to prevent the manage form opening multiple times in rapid succession.
@@ -58,38 +48,19 @@ world.beforeEvents.playerBreakBlock.subscribe((ev) => {
 });
 
 // ── Sort loop + live preview loop ────────────────────────────────────────────
-// CHANGED: worldLoad now starts two intervals instead of one.
-// Old header: "// ── Sort loop ─────────────────────────────────────────────────────────────────"
-// Old worldLoad only set up the sort interval; preview was purely player-triggered (one-shot buttons).
-// The new runLivePreviews interval re-fires showRadiusPreview every previewTicks for any chest with
-// livePreview:true. showRadiusPreview runs for previewTicks then expires, so re-firing at that same
-// cadence chains previews back-to-back with no visible gap.
-// Both intervals use the same self-restart pattern: if the relevant setting changes, clear and
-// re-schedule at the new rate.
+// worldLoad starts two intervals: one for sorting, one for live radius previews.
+// Both use the same self-restart pattern to pick up setting changes mid-session.
 
 world.afterEvents.worldLoad.subscribe(() => {
   let settings = loadSettings();
   let currentInterval = settings.sortInterval;
   let intervalId = system.runInterval(runSort, currentInterval);
 
-  // ── Live preview loop ──────────────────────────────────────────────────────
-  // ADDED: entire block below is new. Old worldLoad had no second interval.
-  // Old:
-  //   world.afterEvents.worldLoad.subscribe(() => {
-  //     let settings = loadSettings();
-  //     let currentInterval = settings.sortInterval;
-  //     let intervalId = system.runInterval(runSort, currentInterval);
-  //     function runSort() { ... }
-  //   });
-
   let currentPreviewTicks = settings.previewTicks;
   let previewIntervalId = system.runInterval(runLivePreviews, currentPreviewTicks);
 
   function runLivePreviews() {
     const s = loadSettings();
-
-    // If previewTicks changed in settings, restart this interval at the new rate.
-
     if (s.previewTicks !== currentPreviewTicks) {
       system.clearRun(previewIntervalId);
       currentPreviewTicks = s.previewTicks;
@@ -103,7 +74,6 @@ world.afterEvents.worldLoad.subscribe(() => {
 
   function runSort() {
     settings = loadSettings();
-
     if (settings.sortInterval !== currentInterval) {
       system.clearRun(intervalId);
       currentInterval = settings.sortInterval;
@@ -111,64 +81,19 @@ world.afterEvents.worldLoad.subscribe(() => {
       return;
     }
 
-    // CHANGED: loadAll() is now called once before the loop and stored in allChests.
-    // Old: for (const inputChest of loadAll()) { ... loadAll().filter(...) }
-    // The original code called loadAll() (JSON.parse of the entire chest registry) once for
-    // the outer for-of, then called it AGAIN inside the loop for every chest that had a networkId.
-    // With N networked chests that was N+1 full deserializations per sort tick.
-    // Now the single parsed array is reused for network grouping below.
+    // loadAll() called once — array reused for cache miss handling below.
 
     const allChests = loadAll();
 
-    // CHANGED: Build networkGroups Map once before the outer loop — O(N) total.
-    // Old: const networkChests = allChests.filter(c => c.networkId === inputChest.networkId)
-    // That filter ran inside the loop, so each of the N networked chests scanned all N chests
-    // to find its group members — O(N) per chest = O(N²) total.
-    // The Map is built in one O(N) pass; each lookup inside the loop is O(1).
-
-    /** @type {Map<string, import("./persistence.js").InputChest[]>} */
-    const networkGroups = new Map();
-
-    for (const chest of allChests) {
-      if (!chest.networkId) continue;
-      if (!networkGroups.has(chest.networkId)) networkGroups.set(chest.networkId, []);
-      networkGroups.get(chest.networkId).push(chest);
-    }
-
-    // CHANGED: Build routingCache Map once per unique networkId — O(unique_networks × M × R³) block reads.
-    // Old: routingMap was rebuilt inside the loop for every input chest. For a network of M chests,
-    // findOutputChests was called M times per chest = M² calls total, each scanning up to R³ blocks.
-    // All M chests in the same network produce an identical routingMap (same networkId → same output pool),
-    // so the M²−M redundant builds were pure waste.
-    // Now each unique networkId's routingMap is built exactly once and reused via O(1) cache lookup.
+    // tickRoutingCache: built from outputCache each tick, keyed by cacheKey.
+    // outputCache stores {loc, dimension, acceptedItem}[] across ticks (plain data only —
+    // Container objects are tick-scoped and cannot be held across ticks).
+    // findOutputChests is only called on a cache miss; hits skip all block reads.
+    // routingMap is rebuilt each tick because Containers are tick-scoped and
+    // untagged chest routing must reflect current chest contents.
 
     /** @type {Map<string, Map<string, import("@minecraft/server").Container>>} */
-    const routingCache = new Map();
-
-    for (const [networkId, members] of networkGroups) {
-      /** @type {Map<string, import("@minecraft/server").Container>} */
-      const routingMap = new Map();
-
-      for (const netChest of members) {
-        const netDim = world.getDimension(netChest.dimension);
-
-        for (const { loc, acceptedItem } of findOutputChests(netChest, netDim)) {
-          const container = getContainer(loc, netDim);
-          if (!container) continue;
-
-          if (acceptedItem) {
-            if (!routingMap.has(acceptedItem)) routingMap.set(acceptedItem, container);
-          } else {
-            for (let i = 0; i < container.size; i++) {
-              const item = container.getItem(i);
-              if (item && !routingMap.has(item.typeId)) routingMap.set(item.typeId, container);
-            }
-          }
-        }
-      }
-
-      routingCache.set(networkId, routingMap);
-    }
+    const tickRoutingCache = new Map();
 
     for (const inputChest of allChests) {
       if (!inputChest.enabled) continue;
@@ -177,89 +102,69 @@ world.afterEvents.worldLoad.subscribe(() => {
         const inputContainer = getContainer(inputChest, dim);
         if (!inputContainer) continue;
 
-        // CHANGED: routingMap is now retrieved from routingCache for networked chests (O(1)),
-        // or built inline for standalone chests (no networkId). The old networkChests array and
-        // inner for-of loop have been replaced by the pre-built cache above.
-        //
-        // Old:
-        //   const routingMap = new Map();
-        //   const networkChests = inputChest.networkId
-        //     ? allChests.filter(c => c.networkId === inputChest.networkId)
-        //     : [inputChest];
-        //   for (const netChest of networkChests) {
-        //     const netDim = world.getDimension(netChest.dimension);
-        //     for (const { loc, acceptedItem } of findOutputChests(netChest, netDim)) {
-        //       const container = getContainer(loc, netDim);
-        //       if (!container) continue;
-        //       if (acceptedItem) {
-        //         if (!routingMap.has(acceptedItem)) routingMap.set(acceptedItem, container);
-        //       } else {
-        //         for (let i = 0; i < container.size; i++) {
-        //           const item = container.getItem(i);
-        //           if (item && !routingMap.has(item.typeId)) routingMap.set(item.typeId, container);
-        //         }
-        //       }
-        //     }
-        //   }
+        const key = cacheKey(inputChest);
 
-        let routingMap;
+        // Populate cache on miss. Networked chests scan all members and merge results
+        // under one shared key — so the scan only runs once per networkId per miss.
 
-        if (inputChest.networkId) {
+        if (!outputCache.has(key)) {
+          /** @type {{ loc: {x:number,y:number,z:number}, dimension: string, acceptedItem: string|null }[]} */
+          const entries = [];
+          const members = inputChest.networkId
+            ? allChests.filter(c => c.networkId === inputChest.networkId)
+            : [inputChest];
+          for (const member of members) {
+            const memberDim = world.getDimension(member.dimension);
+            for (const { loc, acceptedItem } of findOutputChests(member, memberDim)) {
+              entries.push({ loc, dimension: member.dimension, acceptedItem });
+            }
+          }
+          outputCache.set(key, entries);
+        }
 
-          // Networked chest: reuse the pre-built map for this networkId — O(1) lookup.
+        // Build tick-local routingMap from cached locations. Shared per key so all
+        // chests in a network build the map only once per tick.
 
-          routingMap = routingCache.get(inputChest.networkId);
-        } else {
-
-          // Standalone chest: build its routingMap inline (no sharing, no cache needed).
-
-          routingMap = new Map();
-          const netDim = world.getDimension(inputChest.dimension);
-
-          for (const { loc, acceptedItem } of findOutputChests(inputChest, netDim)) {
-            const container = getContainer(loc, netDim);
+        if (!tickRoutingCache.has(key)) {
+          /** @type {Map<string, import("@minecraft/server").Container>} */
+          const routingMap = new Map();
+          for (const { loc, dimension: entryDim, acceptedItem } of outputCache.get(key)) {
+            const container = getContainer(loc, world.getDimension(entryDim));
             if (!container) continue;
-
             if (acceptedItem) {
-
-              // Tagged chest: first tag for a given item type wins.
-
               if (!routingMap.has(acceptedItem)) routingMap.set(acceptedItem, container);
             } else {
-
-              // Untagged chest: infer accepted types from current contents.
-
               for (let i = 0; i < container.size; i++) {
                 const item = container.getItem(i);
                 if (item && !routingMap.has(item.typeId)) routingMap.set(item.typeId, container);
               }
             }
           }
+          tickRoutingCache.set(key, routingMap);
         }
 
-        // CHANGED: stats are now accumulated in sortedItems and written once after the loop.
-        // Old code called recordSort(chest, typeId, amount) for every item moved, then
-        // incrementSortRun(chest) at the end. Each of those did getStats() → JSON.parse,
-        // modified one field, then setDynamicProperty() → JSON.stringify. For a full 27-slot
-        // chest that was 28 read/write pairs per chest per tick just for stats.
-        // Now sortedItems collects { typeId: totalMoved } during the loop, and recordSortBatch
-        // does a single getStats/setDynamicProperty at the end regardless of item count.
-        //
-        // Old:
-        //   recordSort(inputChest, item.typeId, item.amount);   // per item — N reads + N writes
-        //   ...
-        //   if (moved > 0) { recordSort(inputChest, item.typeId, moved); didSort = true; }
-        //   ...
-        //   if (didSort) incrementSortRun(inputChest);          // +1 read + 1 write
+        const routingMap = tickRoutingCache.get(key);
+
+        // Overflow container: fetched fresh each tick (tick-scoped). Receives items
+        // with no matching route. Null if no overflow chest is registered for this network.
+
+        const overflowEntry = findOverflowChest(inputChest.networkId);
+        const overflowContainer = overflowEntry
+          ? getContainer(overflowEntry, world.getDimension(overflowEntry.dimension))
+          : null;
 
         /** @type {Record<string, number>} */
         const sortedItems = {};
         for (let i = 0; i < inputContainer.size; i++) {
           const item = inputContainer.getItem(i);
           if (!item) continue;
-          const target = routingMap.get(item.typeId);
-          if (!target) continue;
-          const leftover = addToContainer(target, item.clone(), inputChest.maxFill ?? 100);
+
+          // Route to matched output chest, or fall back to overflow. If neither exists, skip.
+
+          const dest = routingMap.get(item.typeId) ?? overflowContainer ?? null;
+          if (!dest) continue;
+
+          const leftover = addToContainer(dest, item.clone(), inputChest.maxFill ?? 100);
           if (leftover === 0) {
             inputContainer.setItem(i, undefined);
             sortedItems[item.typeId] = (sortedItems[item.typeId] ?? 0) + item.amount;
@@ -272,10 +177,45 @@ world.afterEvents.worldLoad.subscribe(() => {
           }
         }
 
-        // Single write: 1 read + 1 write instead of (items + 1) read/write pairs.
-
         if (Object.keys(sortedItems).length > 0) recordSortBatch(inputChest, sortedItems);
       } catch (e) { console.warn("[AutoSorter]", e); }
     }
   }
+});
+
+// ── Cache invalidation events ─────────────────────────────────────────────────
+// playerPlaceBlock / playerBreakBlock: invalidate any input chest whose radius covers
+// the affected block, but only for chest or frame types (the only blocks that affect routing).
+// playerBreakBlock also auto-unregisters an overflow chest if the broken block was one.
+// playerInteractWithBlock (frame): deferred one tick via system.run() so the cache is
+// cleared after the engine commits the frame's new contents.
+
+world.afterEvents.playerPlaceBlock.subscribe((ev) => {
+  const typeId = ev.block.typeId;
+  if (!CONFIG.CHEST_TYPES.has(typeId) && !CONFIG.FRAME_TYPES.has(typeId)) return;
+  invalidateFor(ev.block.location, ev.player.dimension.id);
+});
+
+world.afterEvents.playerBreakBlock.subscribe((ev) => {
+  const typeId = ev.brokenBlockPermutation.type.id;
+  if (!CONFIG.CHEST_TYPES.has(typeId) && !CONFIG.FRAME_TYPES.has(typeId)) return;
+
+  const { location } = ev.block;
+  const dimId = ev.player.dimension.id;
+
+  if (CONFIG.CHEST_TYPES.has(typeId)) {
+    const match = loadOverflowChests().find(
+      o => o.x === location.x && o.y === location.y && o.z === location.z && o.dimension === dimId
+    );
+    if (match) unregisterOverflowChest(match.networkId);
+  }
+
+  invalidateFor(location, dimId);
+});
+
+world.beforeEvents.playerInteractWithBlock.subscribe((ev) => {
+  if (!CONFIG.FRAME_TYPES.has(ev.block.typeId)) return;
+  const loc = { ...ev.block.location };
+  const dimId = ev.player.dimension.id;
+  system.run(() => invalidateFor(loc, dimId));
 });
