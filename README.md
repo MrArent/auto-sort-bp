@@ -45,7 +45,7 @@ Tag output chests with **item frames** to target specific item types, or leave t
 3. Click **"Set as Input Chest"** and configure the label, radius, and scan mode
 4. Place output chests within the scan radius
 
-### Tagging Output Chests
+### Tagging Output Chests (Optional)
 
 - Place an **item frame** on the side of an output chest
 - Put the item you want routed into that chest inside the frame
@@ -57,7 +57,7 @@ Tag output chests with **item frames** to target specific item types, or leave t
 - Output chests with no item frame act as **catch-alls**
 - They accept any item that already exists inside them
 
-### Setting Up an Overflow Chest
+### Setting Up an Overflow Chest (Optional)
 
 An overflow chest catches items that couldn't be routed to any output chest, preventing them from piling up in the input chest.
 
